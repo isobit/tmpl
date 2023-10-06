@@ -33,12 +33,23 @@ type Cmd struct {
 	ErrMissingKey bool     `cli:"short=e,help=error for missing keys"`
 	DataFilenames []string `cli:"name=data-file,short=d,append,placeholder=DATAFILE,nodefault,help=file to load data from (can be specified multiple times)"`
 	Data          []string `cli:"name=data,short=D,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
+	Env           bool     `cli:"short=E,help=include environment variables as data at .Env"`
 	InPlace       bool     `cli:"short=i,help=write to output files instead of writing to stdout"`
 	Files         []string `cli:"args"`
 }
 
 func (cmd *Cmd) Run() error {
 	data := map[string]any{}
+
+	if cmd.Env {
+		env := map[string]string{}
+		for _, keyval := range os.Environ() {
+			key, val, _ := strings.Cut(keyval, "=")
+			env[key] = val
+		}
+		data["Env"] = env
+	}
+
 	for _, filename := range cmd.DataFilenames {
 		dataData, err := os.ReadFile(filename)
 		if err != nil {
