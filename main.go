@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,5 +141,50 @@ func (cmd *Cmd) newTemplate() *template.Template {
 		t.Option("missingkey=error")
 	}
 	t.Funcs(sprig.TxtFuncMap())
+	t.Funcs(template.FuncMap{
+		"must": func(v any) (any, error) {
+			if v == nil {
+				return nil, fmt.Errorf("missing")
+			}
+			if s, ok := v.(string); ok {
+				if s == "" {
+					return nil, fmt.Errorf("missing")
+				}
+			}
+			return v, nil
+		},
+		"parseUrl": parseUrlInfo,
+	})
 	return t
+}
+
+type urlInfo struct {
+	Scheme   string
+	Username string
+	Password string
+	Hostname string
+	Port     string
+	Path     string
+	Query    map[string][]string
+	Fragment string
+}
+
+func parseUrlInfo(s string) (urlInfo, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return urlInfo{}, err
+	}
+
+	password, _ := u.User.Password()
+
+	return urlInfo{
+		Scheme:   u.Scheme,
+		Username: u.User.Username(),
+		Password: password,
+		Hostname: u.Hostname(),
+		Port:     u.Port(),
+		Path:     u.Path,
+		Query:    u.Query(),
+		Fragment: u.Fragment,
+	}, nil
 }
