@@ -19,9 +19,14 @@ func main() {
 	cmd := cli.New("tmpl", &Cmd{})
 	cmd.SetDescription(`
 		Render STDIN and/or template file args using Go's text/template engine.
+		See https://pkg.go.dev/text/template for more documentation on the
+		templating language. Note that Sprig functions are available by
+		default, see http://masterminds.github.io/sprig/ for more
+		documentation.
 
 		Data can be specified as explicit top-level keys as flags, or as a
-		JSON/TOML/YAML data file.
+		JSON/TOML/YAML data file. All environment variables are available by
+		default on the ".Env" data key.
 
 		When -i/--in-place is specified, output is written to the same file
 		name as each template file, but with the ".tmpl" extension trimmed.
@@ -31,9 +36,9 @@ func main() {
 
 type Cmd struct {
 	ErrMissingKey bool     `cli:"short=e,help=error for missing keys"`
-	DataFilenames []string `cli:"name=data-file,short=d,append,placeholder=DATAFILE,nodefault,help=file to load data from (can be specified multiple times)"`
+	DataFilenames []string `cli:"name=data-file,short=d,append,placeholder=FILENAME,nodefault,help=file to load data from (can be specified multiple times)"`
 	Data          []string `cli:"name=data,short=D,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
-	Env           bool     `cli:"short=E,help=include environment variables as data at .Env"`
+	NoEnv         bool     `cli:"hidden,help=disable including environment variables as data at .Env"`
 	InPlace       bool     `cli:"short=i,help=write to output files instead of writing to stdout"`
 	Files         []string `cli:"args"`
 }
@@ -41,7 +46,7 @@ type Cmd struct {
 func (cmd *Cmd) Run() error {
 	data := map[string]any{}
 
-	if cmd.Env {
+	if !cmd.NoEnv {
 		env := map[string]string{}
 		for _, keyval := range os.Environ() {
 			key, val, _ := strings.Cut(keyval, "=")
