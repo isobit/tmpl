@@ -120,7 +120,7 @@ func (cmd *Cmd) Run() error {
 			if err != nil {
 				return fmt.Errorf("error getting mode of template file %s: %w", filename, err)
 			}
-			outFile, err := os.OpenFile(outFilename, os.O_RDWR|os.O_CREATE, inInfo.Mode())
+			outFile, err := os.OpenFile(outFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, inInfo.Mode())
 			defer outFile.Close()
 			out = outFile
 		} else {
