@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +14,8 @@ import (
 	"github.com/Masterminds/sprig/v3"
 	"github.com/isobit/cli"
 	"gopkg.in/yaml.v3"
+
+	internalFunctions "github.com/isobit/tmpl/internal/functions"
 )
 
 func main() {
@@ -37,14 +39,14 @@ func main() {
 
 type Cmd struct {
 	ErrMissingKey bool     `cli:"short=e,help=error for missing keys"`
-	DataFilenames []string `cli:"name=data-file,short=d,append,placeholder=FILENAME,nodefault,help=file to load data from (can be specified multiple times)"`
-	Data          []string `cli:"name=data,short=D,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
+	Data          []string `cli:"name=data,short=d,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
+	DataFilenames []string `cli:"name=datafile,short=D,append,placeholder=FILENAME,nodefault,help=file to load data from (can be specified multiple times)"`
 	NoEnv         bool     `cli:"hidden,help=disable including environment variables as data at .Env"`
-	InPlace       bool     `cli:"short=i,help=write to output files instead of writing to stdout"`
+	TemplateName  string   `cli:"short=t"`
 	Files         []string `cli:"args"`
 }
 
-func (cmd *Cmd) Run() error {
+func (cmd *Cmd) data() (map[string]any, error) {
 	data := map[string]any{}
 
 	if !cmd.NoEnv {
@@ -59,132 +61,101 @@ func (cmd *Cmd) Run() error {
 	for _, filename := range cmd.DataFilenames {
 		dataData, err := os.ReadFile(filename)
 		if err != nil {
-			return err
+			return data, err
 		}
 
 		switch filepath.Ext(filename) {
 		case ".json":
 			if err := json.Unmarshal(dataData, &data); err != nil {
-				return err
+				return data, err
 			}
 		case ".yaml":
 			if err := yaml.Unmarshal(dataData, &data); err != nil {
-				return err
+				return data, err
 			}
 		case ".toml":
 			if err := toml.Unmarshal(dataData, &data); err != nil {
-				return err
+				return data, err
 			}
 		default:
-			return fmt.Errorf("data file has unsupported format: %s", filename)
+			return data, fmt.Errorf("data file has unsupported format: %s", filename)
 		}
 	}
 	for _, s := range cmd.Data {
 		key, value, _ := strings.Cut(s, "=")
 		data[key] = value
 	}
-
-	stdinStat, _ := os.Stdin.Stat()
-	if stdinStat.Mode()&os.ModeCharDevice == 0 {
-		text, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("error reading template from stdin: %w", err)
-		}
-
-		tmpl, err := cmd.newTemplate().Parse(string(text))
-		if err != nil {
-			return fmt.Errorf("error parsing template from stdin: %w", err)
-		}
-
-		if err := tmpl.Execute(os.Stdout, data); err != nil {
-			return fmt.Errorf("error executing template from stdin: %w", err)
-		}
-	}
-
-	for _, filename := range cmd.Files {
-		text, err := os.ReadFile(filename)
-		if err != nil {
-			return fmt.Errorf("error reading template file %s: %w", filename, err)
-		}
-
-		tmpl, err := cmd.newTemplate().Parse(string(text))
-		if err != nil {
-			return fmt.Errorf("error parsing template file %s: %w", filename, err)
-		}
-
-		var out io.Writer
-		if cmd.InPlace {
-			outFilename := strings.TrimSuffix(filename, ".tmpl")
-			fmt.Fprintf(os.Stderr, "writing %s\n", outFilename)
-			inInfo, err := os.Stat(filename)
-			if err != nil {
-				return fmt.Errorf("error getting mode of template file %s: %w", filename, err)
-			}
-			outFile, err := os.OpenFile(outFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, inInfo.Mode())
-			defer outFile.Close()
-			out = outFile
-		} else {
-			out = os.Stdout
-		}
-
-		if err := tmpl.Execute(out, data); err != nil {
-			return fmt.Errorf("%s: %w", filename, err)
-		}
-	}
-
-	return nil
+	return data, nil
 }
 
-func (cmd *Cmd) newTemplate() *template.Template {
-	t := template.New("")
+func templateName(filename string) string {
+	return filepath.Base(filename)
+}
+
+func (cmd *Cmd) Run() error {
+	if len(cmd.Files) < 1 {
+		return cli.UsageErrorf("at least one template file is required")
+	}
+
+	var outputTemplateName string
+	if cmd.TemplateName != "" {
+		outputTemplateName = cmd.TemplateName
+	} else {
+		outputTemplateName = templateName(cmd.Files[len(cmd.Files)-1])
+	}
+
+	t := template.New(outputTemplateName)
 	if cmd.ErrMissingKey {
 		t.Option("missingkey=error")
 	}
 	t.Funcs(sprig.TxtFuncMap())
+	t.Funcs(internalFunctions.FuncMap)
+	markdownFuncs := internalFunctions.NewMarkdownFuncs()
 	t.Funcs(template.FuncMap{
-		"must": func(v any) (any, error) {
-			if v == nil {
-				return nil, fmt.Errorf("missing")
-			}
-			if s, ok := v.(string); ok {
-				if s == "" {
-					return nil, fmt.Errorf("missing")
-				}
-			}
-			return v, nil
+		"markdownToHTML": markdownFuncs.MarkdownToHTML,
+		"eval": func(name string, arg interface{}) (string, error) {
+			var buf bytes.Buffer
+			err := t.ExecuteTemplate(&buf, name, arg)
+			return buf.String(), err
 		},
-		"parseUrl": parseUrlInfo,
+		"readFile": func(filename string) (string, error) {
+			data, err := os.ReadFile(filename)
+			return string(data), err
+		},
 	})
-	return t
-}
 
-type urlInfo struct {
-	Scheme   string
-	Username string
-	Password string
-	Hostname string
-	Port     string
-	Path     string
-	Query    map[string][]string
-	Fragment string
-}
+	for _, filename := range cmd.Files {
+		var text string
+		if filename == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("failed to read template from stdin: %w", err)
+			}
+			text = string(data)
+		} else {
+			data, err := os.ReadFile(filename)
+			if err != nil {
+				return fmt.Errorf("failed to read template file %s: %w", filename, err)
+			}
+			text = string(data)
+		}
 
-func parseUrlInfo(s string) (urlInfo, error) {
-	u, err := url.Parse(s)
-	if err != nil {
-		return urlInfo{}, err
+		// fmt.Printf("filename=%s name=%s\n", filename, templateName(filename))
+		t = t.New(templateName(filename))
+		// fmt.Printf("defined %s\n", t.Name())
+		if _, err := t.Parse(text); err != nil {
+			return fmt.Errorf("failed to parse template file %s: %w", filename, err)
+		}
 	}
 
-	password, _ := u.User.Password()
+	data, err := cmd.data()
+	if err != nil {
+		return err
+	}
 
-	return urlInfo{
-		Scheme:   u.Scheme,
-		Username: u.User.Username(),
-		Password: password,
-		Hostname: u.Hostname(),
-		Port:     u.Port(),
-		Path:     u.Path,
-		Query:    u.Query(),
-		Fragment: u.Fragment,
-	}, nil
+	if err := t.Execute(os.Stdout, data); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return nil
 }
