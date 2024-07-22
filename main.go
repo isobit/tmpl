@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,26 +29,36 @@ func main() {
 		Data can be specified as explicit top-level keys as flags, or as a
 		JSON/TOML/YAML data file. All environment variables are available by
 		default on the ".Env" data key.
-
-		When -i/--in-place is specified, output is written to the same file
-		name as each template file, but with the ".tmpl" extension trimmed.
 	`)
 	cmd.Parse().RunFatal()
 }
 
 type Cmd struct {
-	ErrMissingKey bool     `cli:"short=e,help=error for missing keys"`
-	Data          []string `cli:"name=data,short=d,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
-	DataFilenames []string `cli:"name=datafile,short=D,append,placeholder=FILENAME,nodefault,help=file to load data from (can be specified multiple times)"`
-	NoEnv         bool     `cli:"hidden,help=disable including environment variables as data at .Env"`
-	TemplateName  string   `cli:"short=t"`
-	Files         []string `cli:"args"`
+	Debug           bool     `cli:"hidden"`
+	ErrMissingKey   bool     `cli:"short=e,help=error for missing keys"`
+	Data            []string `cli:"name=data,short=d,append,placeholder=KEY=VAL,nodefault,help=set top-level data keys (can be specified multiple times)"`
+	DataFilenames   []string `cli:"name=datafile,short=D,append,placeholder=FILENAME,nodefault,help=file to load data from (can be specified multiple times)"`
+	ContentFilename string   `cli:"name=contentfile,short=C"`
+	NoEnv           bool     `cli:"hidden,help=disable including environment variables as data at .Env"`
+	TemplateName    string   `cli:"short=t"`
+	Files           []string `cli:"args"`
+}
+
+func (cmd *Cmd) debugf(format string, a ...any) {
+	if !cmd.Debug {
+		return
+	}
+	if len(format) > 0 && format[len(format)-1] != '\n' {
+		format = format + "\n"
+	}
+	fmt.Fprintf(os.Stderr, format, a...)
 }
 
 func (cmd *Cmd) data() (map[string]any, error) {
 	data := map[string]any{}
 
 	if !cmd.NoEnv {
+		cmd.debugf("setting Env from env vars")
 		env := map[string]string{}
 		for _, keyval := range os.Environ() {
 			key, val, _ := strings.Cut(keyval, "=")
@@ -59,6 +68,7 @@ func (cmd *Cmd) data() (map[string]any, error) {
 	}
 
 	for _, filename := range cmd.DataFilenames {
+		cmd.debugf("reading data file: %s", filename)
 		dataData, err := os.ReadFile(filename)
 		if err != nil {
 			return data, err
@@ -81,15 +91,22 @@ func (cmd *Cmd) data() (map[string]any, error) {
 			return data, fmt.Errorf("data file has unsupported format: %s", filename)
 		}
 	}
+
 	for _, s := range cmd.Data {
 		key, value, _ := strings.Cut(s, "=")
+		cmd.debugf("adding data key from arguments: %s", key)
 		data[key] = value
 	}
-	return data, nil
-}
 
-func templateName(filename string) string {
-	return filepath.Base(filename)
+	if cmd.ContentFilename != "" {
+		contentData, err := os.ReadFile(cmd.ContentFilename)
+		if err != nil {
+			return data, fmt.Errorf("failed to read content from %s: %w", cmd.ContentFilename, err)
+		}
+		data["Content"] = string(contentData)
+	}
+
+	return data, nil
 }
 
 func (cmd *Cmd) Run() error {
@@ -97,53 +114,38 @@ func (cmd *Cmd) Run() error {
 		return cli.UsageErrorf("at least one template file is required")
 	}
 
-	var outputTemplateName string
-	if cmd.TemplateName != "" {
-		outputTemplateName = cmd.TemplateName
-	} else {
-		outputTemplateName = templateName(cmd.Files[len(cmd.Files)-1])
-	}
-
-	t := template.New(outputTemplateName)
-	if cmd.ErrMissingKey {
-		t.Option("missingkey=error")
-	}
-	t.Funcs(sprig.TxtFuncMap())
-	t.Funcs(internalFunctions.FuncMap)
-	markdownFuncs := internalFunctions.NewMarkdownFuncs()
-	t.Funcs(template.FuncMap{
-		"markdownToHTML": markdownFuncs.MarkdownToHTML,
-		"eval": func(name string, arg interface{}) (string, error) {
-			var buf bytes.Buffer
-			err := t.ExecuteTemplate(&buf, name, arg)
-			return buf.String(), err
-		},
-		"readFile": func(filename string) (string, error) {
-			data, err := os.ReadFile(filename)
-			return string(data), err
-		},
-	})
+	var t *template.Template
 
 	for _, filename := range cmd.Files {
-		var text string
+		var name, text string
+		var err error
 		if filename == "-" {
-			data, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				return fmt.Errorf("failed to read template from stdin: %w", err)
-			}
-			text = string(data)
+			name, text, err = cmd.readFileStdin()
 		} else {
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				return fmt.Errorf("failed to read template file %s: %w", filename, err)
-			}
-			text = string(data)
+			name, text, err = cmd.readFileOS(filename)
+		}
+		if err != nil {
+			return err
 		}
 
-		// fmt.Printf("filename=%s name=%s\n", filename, templateName(filename))
-		t = t.New(templateName(filename))
-		// fmt.Printf("defined %s\n", t.Name())
-		if _, err := t.Parse(text); err != nil {
+		var tmpl *template.Template
+		if t == nil {
+			t = template.New(name)
+			if cmd.ErrMissingKey {
+				t.Option("missingkey=error")
+			}
+			t.Funcs(sprig.TxtFuncMap())
+			t.Funcs(internalFunctions.FuncMap())
+			t.Funcs(internalFunctions.TemplateFuncMap(t))
+		}
+		if name == t.Name() {
+			tmpl = t
+		} else {
+			tmpl = t.New(name)
+		}
+
+		cmd.debugf("new template: filename=%s name=%s\n", filename, name)
+		if _, err := tmpl.Parse(text); err != nil {
 			return fmt.Errorf("failed to parse template file %s: %w", filename, err)
 		}
 	}
@@ -153,9 +155,29 @@ func (cmd *Cmd) Run() error {
 		return err
 	}
 
+	cmd.debugf(t.DefinedTemplates())
+	cmd.debugf("executing template: %s", t.Name())
 	if err := t.Execute(os.Stdout, data); err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
 	return nil
+}
+
+func (cmd *Cmd) readFileStdin() (string, string, error) {
+	cmd.debugf("reading template from stdin")
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read template from stdin: %w", err)
+	}
+	return "-", string(data), nil
+}
+
+func (cmd *Cmd) readFileOS(filename string) (string, string, error) {
+	cmd.debugf("reading template from file: %s", filename)
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read template file %s: %w", filename, err)
+	}
+	return filepath.Base(filename), string(data), nil
 }

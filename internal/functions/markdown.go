@@ -6,6 +6,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
+	"go.abhg.dev/goldmark/mermaid"
 )
 
 type MarkdownFuncs struct {
@@ -15,7 +16,10 @@ type MarkdownFuncs struct {
 func NewMarkdownFuncs() MarkdownFuncs {
 	return MarkdownFuncs{
 		md: goldmark.New(
-			goldmark.WithExtensions(extension.GFM),
+			goldmark.WithExtensions(
+				extension.GFM,
+				&mermaid.Extender{},
+			),
 			goldmark.WithParserOptions(
 				parser.WithAutoHeadingID(),
 			),

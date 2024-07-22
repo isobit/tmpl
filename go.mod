@@ -7,7 +7,8 @@ require (
 	github.com/Masterminds/sprig/v3 v3.2.3
 	github.com/isobit/cli v0.11.0
 	github.com/yuin/goldmark v1.4.13
-	gopkg.in/yaml.v3 v3.0.0
+	go.abhg.dev/goldmark/mermaid v0.5.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
